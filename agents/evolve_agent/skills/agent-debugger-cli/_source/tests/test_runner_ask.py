@@ -46,3 +46,59 @@ def test_ask_mode_happy_path(tmp_path, monkeypatch):
     assert result.mode == "ask"
     assert result.answer == "42"
     assert result.budget_exceeded is False
+
+
+def test_ask_mode_coerces_check_shaped_payload(tmp_path, monkeypatch):
+    """Models sometimes return QC/check JSON during adb ask; use `response` as answer."""
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("LLM_BASE_URL", "u")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AHE_HOME", str(tmp_path))
+    (tmp_path / "evolve_agent" / "tools").mkdir(parents=True)
+    (tmp_path / "evolve_agent" / "tools" / "__init__.py").write_text("")
+
+    fake_agent = _scripted_agent(
+        {
+            "mode": "check",
+            "issues": [],
+            "response": "diagnosis text",
+        }
+    )
+
+    with patch("agent_debugger_core.runtime.runner._build_agent", return_value=fake_agent):
+        result = run_agent(
+            trace_paths=[Path("/fake/trace.json")],
+            mode="ask",
+            question="why?",
+        )
+
+    assert result.mode == "ask"
+    assert result.answer == "diagnosis text"
+    fake_agent.run.assert_called_once()
+
+
+def test_ask_mode_retries_when_payload_invalid(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("LLM_BASE_URL", "u")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AHE_HOME", str(tmp_path))
+    (tmp_path / "evolve_agent" / "tools").mkdir(parents=True)
+    (tmp_path / "evolve_agent" / "tools" / "__init__.py").write_text("")
+
+    fake_agent = MagicMock()
+    fake_agent.run.side_effect = [
+        _wrap({"mode": "oops"}),
+        _wrap({"mode": "ask", "answer": "fixed"}),
+    ]
+
+    with patch("agent_debugger_core.runtime.runner._build_agent", return_value=fake_agent):
+        result = run_agent(
+            trace_paths=[Path("/fake/trace.json")],
+            mode="ask",
+            question="why?",
+        )
+
+    assert result.answer == "fixed"
+    assert fake_agent.run.call_count == 2

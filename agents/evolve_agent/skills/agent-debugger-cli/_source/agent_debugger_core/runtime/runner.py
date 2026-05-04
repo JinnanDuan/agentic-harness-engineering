@@ -19,6 +19,16 @@ AGENT_CONFIG_PATH = RUNTIME_DIR / "agent_config.yaml"
 ALLOWED_ISSUE_TYPES = {"工具错误", "幻觉", "循环", "不合规", "截断"}
 BUDGET_MARKER = "[Note: Maximum iteration limit reached]"
 
+ASK_SCHEMA_RETRY_SUFFIX = (
+    "\n\nYour last complete_task payload did not match the ask schema: "
+    'expected `{"mode": "ask", "answer": "<your reply>"}` '
+    "(a JSON object whose string fields go inside complete_task `result`). "
+    'Do NOT use `"mode": "check"`, `issues`, or `response` here — those belong to QC/check mode only. '
+    "Even if the Question lists ROOT CAUSE / numbered items, put the entire reply in the single "
+    "string field `answer`.\n"
+    "Re-emit a valid `ask` payload that matches the schema exactly."
+)
+
 
 def _runner_io_log_enabled() -> bool:
     return (os.environ.get("ADB_RUNNER_IO_LOG") or "").strip().lower() in (
@@ -122,6 +132,12 @@ def _build_user_message(trace_paths: List[Path], mode: str, question: Optional[s
     lines.append("")
     if mode == "ask":
         lines.append(f"Question: {question or 'Why is this trace so slow?'}")
+        lines.append(
+            "Output contract for this turn: use complete_task with JSON for **ask** mode only — "
+            '`{"mode": "ask", "answer": "<your full analysis as one string>"}`. '
+            "Put every section (including any ROOT CAUSE / PASS vs FAIL bullets) inside `answer`. "
+            'Do NOT emit `mode: "check"`, `issues`, or `response`.'
+        )
     else:
         lines.append(
             "Task: produce a QC report. Return a JSON payload with "
@@ -227,6 +243,22 @@ def _validate_check_payload(payload: dict) -> None:
             raise RunnerError(f"issue #{i}.message_index must be int")
 
 
+def _resolve_ask_answer(payload: dict) -> tuple[Optional[str], bool]:
+    """Extract text for ask mode. Returns (answer, coerced_from_check).
+
+    Models sometimes emit check-shaped JSON (`mode=check`, `response=...`) while the CLI
+    invoked ask mode; accept `response` as the answer string when present.
+    """
+    ans = payload.get("answer")
+    if isinstance(ans, str):
+        return ans, False
+    if payload.get("mode") == "check":
+        resp = payload.get("response")
+        if isinstance(resp, str):
+            return resp, True
+    return None, False
+
+
 def _run_with_retry(agent, user_message: str, *, attempts: int = 3):
     last = None
     for i in range(attempts):
@@ -283,16 +315,65 @@ def run_agent(
         )
 
     if mode == "ask":
-        answer = payload.get("answer")
-        if not isinstance(answer, str):
+        answer, coerced = _resolve_ask_answer(payload)
+        if isinstance(answer, str):
+            if coerced:
+                dumped = json.dumps(payload, ensure_ascii=False, indent=2)
+                _runner_diag_dump(
+                    "ask mode: accepted check-shaped payload; using `response` as `answer`",
+                    dumped,
+                    max_chars=80_000,
+                )
+            return RunnerResult(mode="ask", answer=answer)
+
+        _dump_failure_context(
+            reason="ask payload invalid (need string `answer` or check-shaped `response`)",
+            user_message=user_message,
+            run_output=run_output,
+            payload=payload,
+        )
+        retry_msg = user_message + ASK_SCHEMA_RETRY_SUFFIX
+        _runner_io_dump(
+            "run_agent ask retry user_message (after schema rejection)",
+            retry_msg,
+        )
+        run_output = _run_with_retry(agent, retry_msg)
+        _runner_io_dump(
+            "run_agent ask retry raw agent.run() return",
+            run_output,
+        )
+        try:
+            payload = _parse_run_output(run_output)
+        except RunnerError as err:
             _dump_failure_context(
-                reason="ask payload invalid (need string `answer`)",
-                user_message=user_message,
+                reason=f"ask retry parse error ({err})",
+                user_message=retry_msg,
                 run_output=run_output,
-                payload=payload,
             )
-            raise RunnerError("ask payload missing string `answer`")
-        return RunnerResult(mode="ask", answer=answer)
+            raise
+        except BudgetExceeded as be:
+            return RunnerResult(
+                mode="ask",
+                answer=f"[budget-exceeded] {be.fallback_text}".strip(),
+                budget_exceeded=True,
+            )
+        answer, coerced = _resolve_ask_answer(payload)
+        if isinstance(answer, str):
+            if coerced:
+                dumped = json.dumps(payload, ensure_ascii=False, indent=2)
+                _runner_diag_dump(
+                    "ask mode (retry): accepted check-shaped payload; using `response` as `answer`",
+                    dumped,
+                    max_chars=80_000,
+                )
+            return RunnerResult(mode="ask", answer=answer)
+        _dump_failure_context(
+            reason="ask payload still invalid after retry (need string `answer`)",
+            user_message=retry_msg,
+            run_output=run_output,
+            payload=payload,
+        )
+        raise RunnerError("ask payload missing string `answer`")
 
     try:
         _validate_check_payload(payload)
