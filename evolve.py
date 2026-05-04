@@ -2134,6 +2134,16 @@ def update_history_after(exp_dir: Path, iteration: int, evolve_result: str) -> N
 # Phase 2.6: Update iteration_scores
 # ---------------------------------------------------------------------------
 
+def _job_dir_relative_to_experiment(exp_dir: Path, job_dir: Path) -> str:
+    """Store job_dir under exp_dir as a relative path; else absolute (external / other experiment)."""
+    exp_r = exp_dir.resolve()
+    job_r = job_dir.resolve()
+    try:
+        return str(job_r.relative_to(exp_r))
+    except ValueError:
+        return str(job_r)
+
+
 def update_iteration_scores(exp_dir: Path, config: dict, iteration: int,
                             pass_rate: float, n_pass: int, n_total: int,
                             job_dir: Path, *,
@@ -2163,7 +2173,7 @@ def update_iteration_scores(exp_dir: Path, config: dict, iteration: int,
         "pass_rate": round(pass_rate, 4),
         "k": k,
         "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "job_dir": str(job_dir.relative_to(exp_dir)),
+        "job_dir": _job_dir_relative_to_experiment(exp_dir, job_dir),
     }
 
     if timing:
