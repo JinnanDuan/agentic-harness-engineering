@@ -1418,11 +1418,18 @@ def _write_adb_diagnostic_log(
     cmd: list[str],
     proc: subprocess.CompletedProcess,
     qa_env_set: dict[str, bool],
+    *,
+    attempt: int | None = None,
 ) -> Path:
-    """Write full adb subprocess stdout/stderr for post-mortems (query redacted in cmd)."""
+    """Write full adb subprocess stdout/stderr for post-mortems (query redacted in cmd).
+
+    Always writes ``{safe}.log`` (latest attempt overwrites). When ``attempt`` is set
+    (1-based), also writes ``{safe}_attempt{N}.log`` so interrupted retries still leave
+    a file on disk before ``time.sleep`` backoff.
+    """
     diag_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^\w\-+.]+", "_", task_name).strip("_")[:120] or "unknown_task"
-    path = diag_dir / f"{safe}.log"
+    canonical = diag_dir / f"{safe}.log"
     lines = [
         f"task: {task_name}",
         f"returncode: {proc.returncode}",
@@ -1442,8 +1449,11 @@ def _write_adb_diagnostic_log(
             "",
         ]
     )
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    text = "\n".join(lines)
+    canonical.write_text(text, encoding="utf-8")
+    if attempt is not None:
+        (diag_dir / f"{safe}_attempt{attempt}.log").write_text(text, encoding="utf-8")
+    return canonical
 
 
 def _invoke_adb_ask_once(
@@ -1605,13 +1615,29 @@ def _run_single_adb_ask(
     backoff = float(config.get("retry_backoff_seconds", 2.0))
 
     response = ""
-    last_proc: subprocess.CompletedProcess | None = None
+    last_diag_path: Path | None = None
     for attempt in range(retry_attempts):
         response, proc = _invoke_adb_ask_once(cmd, env, timeout)
         if not response.startswith("[adb"):
             break
         if proc is not None:
-            last_proc = proc
+            if adb_diag_dir is not None:
+                try:
+                    last_diag_path = _write_adb_diagnostic_log(
+                        adb_diag_dir,
+                        job.task_name,
+                        cmd,
+                        proc,
+                        qa_env_set,
+                        attempt=attempt + 1,
+                    )
+                    print(
+                        f"[adb] task={job.task_name} adb_diag (attempt {attempt + 1}"
+                        f"/{retry_attempts}) → {last_diag_path}",
+                        flush=True,
+                    )
+                except OSError as exc:
+                    print(f"[adb] could not write diagnostic log: {exc}", flush=True)
         if attempt < retry_attempts - 1:
             msg = response[:200].replace("\n", " ")
             print(
@@ -1623,22 +1649,8 @@ def _run_single_adb_ask(
             backoff *= 2.0
 
     diag_note = ""
-    if (
-        response.startswith("[adb")
-        and adb_diag_dir is not None
-        and last_proc is not None
-    ):
-        try:
-            log_path = _write_adb_diagnostic_log(
-                adb_diag_dir, job.task_name, cmd, last_proc, qa_env_set
-            )
-            diag_note = f"\n\n**ADB diagnostic log:** `{log_path}`"
-            print(
-                f"[adb] task={job.task_name} diagnostic log → {log_path}",
-                flush=True,
-            )
-        except OSError as exc:
-            print(f"[adb] could not write diagnostic log: {exc}", flush=True)
+    if response.startswith("[adb") and last_diag_path is not None:
+        diag_note = f"\n\n**ADB diagnostic log:** `{last_diag_path}`"
 
     # When adb itself timed out / failed, build a fallback with key info
     # so the evolve agent has something to work with.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,81 @@ AGENT_CONFIG_PATH = RUNTIME_DIR / "agent_config.yaml"
 
 ALLOWED_ISSUE_TYPES = {"工具错误", "幻觉", "循环", "不合规", "截断"}
 BUDGET_MARKER = "[Note: Maximum iteration limit reached]"
+
+
+def _runner_io_log_enabled() -> bool:
+    return (os.environ.get("ADB_RUNNER_IO_LOG") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _runner_io_dump(label: str, text: Any, *, max_chars: int = 120_000) -> None:
+    """Debug helper: log model-facing input / agent.run() raw output to stderr.
+
+    Enable with ``ADB_RUNNER_IO_LOG=1``. When ``evolve.py`` runs ``adb ask`` with
+    ``capture_output=True``, this stderr shows up under ``--- stderr ---`` in
+    ``adb_diag/<task>.log``.
+    """
+    if not _runner_io_log_enabled():
+        return
+    _runner_diag_dump(label, text, max_chars=max_chars, prefix="[ADB_RUNNER_IO]")
+
+
+def _runner_diag_dump(
+    label: str,
+    text: Any,
+    *,
+    max_chars: int = 120_000,
+    prefix: str = "[ADB_RUNNER_DIAG]",
+) -> None:
+    """Always emit to stderr (truncated). Used on failures so ``adb_diag`` captures context."""
+    s = text if isinstance(text, str) else repr(text)
+    n = len(s)
+    if n <= max_chars:
+        body = s
+    else:
+        half = max_chars // 2
+        body = (
+            s[:half]
+            + f"\n... [{n - max_chars} chars omitted middle] ...\n"
+            + s[-half:]
+        )
+    print(f"{prefix} {label} ({n} chars)", file=sys.stderr, flush=True)
+    print(body, file=sys.stderr, flush=True)
+
+
+def _dump_failure_context(
+    *,
+    reason: str,
+    user_message: str,
+    run_output: Any,
+    payload: Any | None = None,
+    max_chars: int = 120_000,
+) -> None:
+    _runner_diag_dump(
+        f"{reason}: user_message (agent.run message=…)",
+        user_message,
+        max_chars=max_chars,
+    )
+    _runner_diag_dump(
+        f"{reason}: raw agent.run() return",
+        run_output,
+        max_chars=max_chars,
+    )
+    if payload is not None:
+        dumped = (
+            json.dumps(payload, ensure_ascii=False, indent=2)
+            if isinstance(payload, dict)
+            else repr(payload)
+        )
+        _runner_diag_dump(
+            f"{reason}: parsed inner payload (complete_task result)",
+            dumped,
+            max_chars=max_chars,
+        )
 
 
 class RunnerError(Exception):
@@ -173,11 +250,23 @@ def run_agent(
     llm_settings = resolve_llm_settings()
     agent = _build_agent(llm_settings)
     user_message = _build_user_message(trace_paths, mode, question)
+    _runner_io_dump(f"run_agent mode={mode} user_message (to agent.run)", user_message)
 
     run_output = _run_with_retry(agent, user_message)
+    _runner_io_dump(
+        f"run_agent mode={mode} raw agent.run() return",
+        run_output,
+    )
 
     try:
         payload = _parse_run_output(run_output)
+    except RunnerError as err:
+        _dump_failure_context(
+            reason=f"run_agent parse error ({err})",
+            user_message=user_message,
+            run_output=run_output,
+        )
+        raise
     except BudgetExceeded as be:
         fallback_text = be.fallback_text
         if mode == "ask":
@@ -196,21 +285,48 @@ def run_agent(
     if mode == "ask":
         answer = payload.get("answer")
         if not isinstance(answer, str):
+            _dump_failure_context(
+                reason="ask payload invalid (need string `answer`)",
+                user_message=user_message,
+                run_output=run_output,
+                payload=payload,
+            )
             raise RunnerError("ask payload missing string `answer`")
         return RunnerResult(mode="ask", answer=answer)
 
     try:
         _validate_check_payload(payload)
     except RunnerError as first_err:
+        _dump_failure_context(
+            reason=f"check payload rejected ({first_err})",
+            user_message=user_message,
+            run_output=run_output,
+            payload=payload,
+        )
         retry_msg = (
             user_message
             + "\n\nYour last complete_task payload was rejected: "
             + str(first_err)
             + "\nRe-emit a valid `check` payload that matches the schema exactly."
         )
+        _runner_io_dump(
+            "run_agent check retry user_message (after schema rejection)",
+            retry_msg,
+        )
         run_output = _run_with_retry(agent, retry_msg)
+        _runner_io_dump(
+            "run_agent check retry raw agent.run() return",
+            run_output,
+        )
         try:
             payload = _parse_run_output(run_output)
+        except RunnerError as err:
+            _dump_failure_context(
+                reason=f"check retry parse error ({err})",
+                user_message=retry_msg,
+                run_output=run_output,
+            )
+            raise
         except BudgetExceeded as be:
             return RunnerResult(
                 mode="check",
@@ -218,7 +334,16 @@ def run_agent(
                 response=f"[budget-exceeded] {be.fallback_text}".strip(),
                 budget_exceeded=True,
             )
-        _validate_check_payload(payload)
+        try:
+            _validate_check_payload(payload)
+        except RunnerError as err:
+            _dump_failure_context(
+                reason=f"check payload still invalid after retry ({err})",
+                user_message=retry_msg,
+                run_output=run_output,
+                payload=payload,
+            )
+            raise
 
     return RunnerResult(
         mode="check",

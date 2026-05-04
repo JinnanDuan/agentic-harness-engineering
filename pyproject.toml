@@ -24,7 +24,8 @@ agentic-harness-engineering = "evolve:main"
 constraint-dependencies = ["claude-agent-sdk<0.1.49"]
 
 [tool.uv.sources]
-agent_debugger_core = { path = "agents/evolve_agent/skills/agent-debugger-cli/_source" }
+# editable：改 agents/.../agent-debugger-cli/_source 后无需再 uv sync / pip install
+agent_debugger_core = { path = "agents/evolve_agent/skills/agent-debugger-cli/_source", editable = true }
 
 [tool.setuptools]
 py-modules = ["evolve"]
