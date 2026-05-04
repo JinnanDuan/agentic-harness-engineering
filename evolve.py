@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1378,30 +1379,129 @@ def _extract_trace_timing(trace_path: Path) -> str:
     return header + "\n".join(turns)
 
 
-def _invoke_adb_ask_once(cmd: list[str], env: dict[str, str], timeout: float) -> str:
-    """单次执行 ``adb ask``：成功返回模型回复文本；失败则返回以 ``[adb`` 开头的错误摘要。"""
+def _sanitize_adb_cmd_for_log(cmd: list[str]) -> str:
+    """Log-safe ``adb`` command: replace ``-q`` argument with a length placeholder."""
+    parts: list[str] = []
+    i = 0
+    while i < len(cmd):
+        if cmd[i] == "-q" and i + 1 < len(cmd):
+            parts.extend(["-q", f"<query {len(cmd[i + 1])} chars>"])
+            i += 2
+            continue
+        parts.append(cmd[i])
+        i += 1
+    return shlex.join(parts)
+
+
+def _write_adb_diagnostic_log(
+    diag_dir: Path,
+    task_name: str,
+    cmd: list[str],
+    proc: subprocess.CompletedProcess,
+    qa_env_set: dict[str, bool],
+) -> Path:
+    """Write full adb subprocess stdout/stderr for post-mortems (query redacted in cmd)."""
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^\w\-+.]+", "_", task_name).strip("_")[:120] or "unknown_task"
+    path = diag_dir / f"{safe}.log"
+    lines = [
+        f"task: {task_name}",
+        f"returncode: {proc.returncode}",
+        f"cmd: {_sanitize_adb_cmd_for_log(cmd)}",
+        "QA_* env (from evolve config agent_debugger.llm):",
+    ]
+    for key in ("QA_MODEL_NAME", "QA_BASE_URL", "QA_API_KEY"):
+        lines.append(f"  {key}: {'set' if qa_env_set.get(key) else 'not set'}")
+    lines.extend(
+        [
+            "",
+            "--- stdout ---",
+            proc.stdout if proc.stdout else "(empty)",
+            "",
+            "--- stderr ---",
+            proc.stderr if proc.stderr else "(empty)",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _invoke_adb_ask_once(
+    cmd: list[str], env: dict[str, str], timeout: float
+) -> tuple[str, subprocess.CompletedProcess | None]:
+    """单次执行 ``adb ask``。
+
+    成功时返回 ``(模型回复, None)``。失败时返回 ``(以 [adb 开头的错误摘要, CompletedProcess|None)``；
+    若子进程正常退出（含 ``status=failed`` 的 JSON），则第二个元素为 ``CompletedProcess``，
+    便于写入 ``adb_diag`` 完整输出。
+
+    ``adb --format json`` 在失败时常把 JSON 打到 **stdout** 且 exit≠0，stderr 为空；
+    旧逻辑只读 stderr，导致看不到真实错误。
+    """
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout, env=env,
+            cmd, capture_output=True, text=True, timeout=timeout, env=env
         )
         if result.returncode == 0:
             try:
                 parsed = json.loads(result.stdout)
-                if parsed.get("status") == "failed":
-                    return f"[adb failed] {parsed.get('error', 'unknown error')}"
-                return parsed.get("response", result.stdout.strip())
             except json.JSONDecodeError:
-                return result.stdout.strip()
-        return f"[adb error] exit={result.returncode}: {result.stderr[:200]}"
-    except subprocess.TimeoutExpired:
-        return f"[adb timeout] exceeded {timeout}s"
+                return result.stdout.strip(), None
+            if not isinstance(parsed, dict):
+                return result.stdout.strip(), None
+            if parsed.get("status") == "failed":
+                return (
+                    f"[adb failed] {parsed.get('error', 'unknown error')}",
+                    result,
+                )
+            return parsed.get("response", result.stdout.strip()), None
+
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout:
+            try:
+                parsed = json.loads(stdout)
+                if isinstance(parsed, dict) and parsed.get("status") == "failed":
+                    return (
+                        f"[adb failed] {parsed.get('error', 'unknown error')}",
+                        result,
+                    )
+            except json.JSONDecodeError:
+                pass
+        detail_parts: list[str] = []
+        if stderr:
+            detail_parts.append(f"stderr:\n{stderr}")
+        if stdout:
+            detail_parts.append(f"stdout:\n{stdout}")
+        if not detail_parts:
+            detail_parts.append(
+                "(no stdout/stderr — uncommon; see adb_diag/*.log if written)"
+            )
+        msg = "[adb error] exit=%s:\n%s" % (
+            result.returncode,
+            "\n\n".join(detail_parts),
+        )
+        return msg, result
+    except subprocess.TimeoutExpired as e:
+        extra_bits: list[str] = []
+        if e.stdout:
+            extra_bits.append(f"partial stdout:\n{e.stdout[-8000:]}")
+        if e.stderr:
+            extra_bits.append(f"partial stderr:\n{e.stderr[-8000:]}")
+        extra = "\n" + "\n\n".join(extra_bits) if extra_bits else ""
+        return f"[adb timeout] exceeded {timeout}s{extra}", None
     except Exception as e:
-        return f"[adb exception] {e}"
+        return f"[adb exception] {e}", None
 
 
-def _run_single_adb_ask(job: TaskAnalysisJob, config: dict, k: int = 1,
-                        extra_query_prefix: str = "") -> dict:
+def _run_single_adb_ask(
+    job: TaskAnalysisJob,
+    config: dict,
+    k: int = 1,
+    extra_query_prefix: str = "",
+    adb_diag_dir: Path | None = None,
+) -> dict:
     """Run `adb ask` for one task and return result dict."""
     n_total = job.n_pass + job.n_fail + job.n_timeout
 
@@ -1474,6 +1574,11 @@ def _run_single_adb_ask(job: TaskAnalysisJob, config: dict, k: int = 1,
         env["QA_BASE_URL"] = llm_cfg["base_url"]
     if llm_cfg.get("api_key"):
         env["QA_API_KEY"] = llm_cfg["api_key"]
+    qa_env_set = {
+        "QA_MODEL_NAME": bool(llm_cfg.get("model")),
+        "QA_BASE_URL": bool(llm_cfg.get("base_url")),
+        "QA_API_KEY": bool(llm_cfg.get("api_key")),
+    }
 
     timeout = float(config.get("timeout_per_task", 180))
     # 按 task 重试：子进程失败 / JSON status=failed / 超时 / 非零退出码 等凡返回 [adb 前缀的均会重试
@@ -1481,10 +1586,13 @@ def _run_single_adb_ask(job: TaskAnalysisJob, config: dict, k: int = 1,
     backoff = float(config.get("retry_backoff_seconds", 2.0))
 
     response = ""
+    last_proc: subprocess.CompletedProcess | None = None
     for attempt in range(retry_attempts):
-        response = _invoke_adb_ask_once(cmd, env, timeout)
+        response, proc = _invoke_adb_ask_once(cmd, env, timeout)
         if not response.startswith("[adb"):
             break
+        if proc is not None:
+            last_proc = proc
         if attempt < retry_attempts - 1:
             msg = response[:200].replace("\n", " ")
             print(
@@ -1494,6 +1602,24 @@ def _run_single_adb_ask(job: TaskAnalysisJob, config: dict, k: int = 1,
             )
             time.sleep(backoff)
             backoff *= 2.0
+
+    diag_note = ""
+    if (
+        response.startswith("[adb")
+        and adb_diag_dir is not None
+        and last_proc is not None
+    ):
+        try:
+            log_path = _write_adb_diagnostic_log(
+                adb_diag_dir, job.task_name, cmd, last_proc, qa_env_set
+            )
+            diag_note = f"\n\n**ADB diagnostic log:** `{log_path}`"
+            print(
+                f"[adb] task={job.task_name} diagnostic log → {log_path}",
+                flush=True,
+            )
+        except OSError as exc:
+            print(f"[adb] could not write diagnostic log: {exc}", flush=True)
 
     # When adb itself timed out / failed, build a fallback with key info
     # so the evolve agent has something to work with.
@@ -1523,6 +1649,8 @@ def _run_single_adb_ask(job: TaskAnalysisJob, config: dict, k: int = 1,
                     timing = _extract_trace_timing(tp)
                     if timing:
                         fallback_parts.append(f"\n{timing}")
+        if diag_note:
+            fallback_parts.append(diag_note.strip())
         fallback_parts.append(
             "\n**NOTE**: Debugger LLM analysis was not available for this task. "
             "The evolve agent should read the raw trace directly if deeper analysis is needed."
@@ -1752,9 +1880,10 @@ def run_parallel_adb_ask(
     print(f"[adb] analyzing {len(jobs)} tasks ({', '.join(parts)}) "
           f"with {max_workers} workers")
 
+    adb_diag_dir = iteration_dir / "input" / "analysis" / "adb_diag"
     # Run the first job serially to warm up adb's internal venv (~/.adb/venvs/),
     # avoiding race conditions when multiple workers create it simultaneously.
-    first_result = _run_single_adb_ask(jobs[0], config, k=k)
+    first_result = _run_single_adb_ask(jobs[0], config, k=k, adb_diag_dir=adb_diag_dir)
     status = "ok" if not first_result["response"].startswith("[adb") else "err"
     print(f"  [{status}] {jobs[0].task_name} ({jobs[0].mode}) [warmup]")
     results: list[dict] = [first_result]
@@ -1763,7 +1892,9 @@ def run_parallel_adb_ask(
     if remaining_jobs:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_map = {
-                pool.submit(_run_single_adb_ask, job, config, k=k): job
+                pool.submit(
+                    _run_single_adb_ask, job, config, k=k, adb_diag_dir=adb_diag_dir
+                ): job
                 for job in remaining_jobs
             }
             for future in concurrent.futures.as_completed(future_map):
@@ -3562,6 +3693,10 @@ def run_multi_variant_adb(config: dict, variant_results: list[dict],
         + "\n".join(variant_header_parts)
     )
 
+    bon_adb_diag_dir = (
+        exp_dir / "runs" / f"iteration_{iteration + 1:03d}" / "input" / "analysis" / "adb_diag"
+    )
+
     print(f"[bon-adb] Analyzing {len(jobs)} tasks across {len(variant_results)} variants "
           f"with {max_workers} workers")
 
@@ -3585,8 +3720,13 @@ def run_multi_variant_adb(config: dict, variant_results: list[dict],
             mode=job.mode,
             trace_type=job.trace_type,
         )
-        result = _run_single_adb_ask(original_job, adb_config, k=k,
-                                      extra_query_prefix=extra_prefix)
+        result = _run_single_adb_ask(
+            original_job,
+            adb_config,
+            k=k,
+            extra_query_prefix=extra_prefix,
+            adb_diag_dir=bon_adb_diag_dir,
+        )
         result["variant_context"] = ctx
         return result
 
