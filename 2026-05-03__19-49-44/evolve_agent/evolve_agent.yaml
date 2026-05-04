@@ -1,0 +1,72 @@
+llm_config:
+  api_key: ${env.LLM_API_KEY}
+  api_type: openai_chat_completion
+  base_url: ${env.LLM_BASE_URL}
+  max_tokens: 32000
+  model: glm-5.1
+  stream: true
+  temperature: 0.7
+max_context_tokens: 200000
+max_iterations: 500
+middlewares:
+- import: middleware.long_tool_output:LongToolOutputMiddleware
+  params:
+    bypass_tool_names:
+    - run_shell_command
+    head_chars: 5000
+    head_lines: 50
+    max_output_chars: 10000
+    tail_chars: 5000
+    tail_lines: 30
+- import: middleware.context_compaction:ContextCompactionMiddleware
+  params:
+    auto_compact: true
+    compaction_strategy: tool_result_compaction
+    keep_iterations: 10
+    max_context_tokens: 220000
+    threshold: 0.75
+name: nexau_evolution_agent
+sandbox_config:
+  type: local
+  work_dir: ${env.EVOLVE_WORK_DIR}
+skills:
+- ./skills/nexau-evolution-guide
+stop_tools:
+- complete_task
+system_prompt: ./evolve_prompt.md
+system_prompt_type: jinja
+tool_call_mode: openai
+tools:
+- binding: tools.file_tools:read_file
+  name: read_file
+  yaml_path: ./tool_descriptions/read_file.tool.yaml
+- binding: tools.file_tools:write_file
+  name: write_file
+  yaml_path: ./tool_descriptions/write_file.tool.yaml
+- binding: tools.file_tools:replace
+  name: replace
+  yaml_path: ./tool_descriptions/replace.tool.yaml
+- binding: tools.file_tools:search_file_content
+  name: search_file_content
+  yaml_path: ./tool_descriptions/search_file_content.tool.yaml
+- binding: tools.file_tools:glob
+  name: glob
+  yaml_path: ./tool_descriptions/Glob.tool.yaml
+- binding: tools.file_tools:list_directory
+  name: list_directory
+  yaml_path: ./tool_descriptions/list_directory.tool.yaml
+- binding: tools.shell_tools:run_shell_command
+  name: run_shell_command
+  yaml_path: ./tool_descriptions/run_shell_command.tool.yaml
+- binding: tools.web_tools:google_web_search
+  name: web_search
+  yaml_path: ./tool_descriptions/WebSearch.tool.yaml
+- binding: tools.web_tools:web_fetch
+  name: web_read
+  yaml_path: ./tool_descriptions/WebFetch.tool.yaml
+- binding: tools.session_tools:complete_task
+  name: complete_task
+  yaml_path: ./tool_descriptions/complete_task.tool.yaml
+tracers:
+- import: nexau.archs.tracer.adapters.in_memory:InMemoryTracer
+type: agent

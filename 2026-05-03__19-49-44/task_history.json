@@ -1,0 +1,14 @@
+{
+  "astropy__astropy-12907": [
+    [
+      1,
+      "fail",
+      {
+        "n_pass": 1,
+        "n_fail": 1,
+        "n_exception": 0,
+        "total": 2
+      }
+    ]
+  ]
+}

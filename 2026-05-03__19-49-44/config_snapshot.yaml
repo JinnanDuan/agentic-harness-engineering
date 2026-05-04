@@ -1,0 +1,88 @@
+agent_config_filename: code_agent.yaml
+agent_debugger:
+  enabled: true
+  llm:
+    model: glm-5.1
+  max_concurrent: 16
+  max_tasks: 90
+  retry_attempts: 3
+  retry_backoff_seconds: 2.0
+  timeout_per_task: 600
+best_of_n:
+  enabled: false
+  n: 2
+  strategy_hints:
+  - 'You MUST focus on STRUCTURAL changes: middleware, tool implementations, or sub-agents.
+    Do NOT modify system prompt or skill content this iteration.'
+  - 'You MUST focus on GUIDANCE changes: system prompt rules, skill packages, tool
+    descriptions, or LongTermMEMORY. Do NOT create or modify middleware Python files
+    this iteration.'
+code_agent_patch:
+  llm_config:
+    api_type: openai_chat_completion
+    stream: true
+evolve_agent:
+  llm_config:
+    model: glm-5.1
+    stream: true
+experiment_timeout_minutes: 0
+explore_agent:
+  code_sources:
+    nexau:
+      local_fallback: ../nexau
+      ref: v0.3.9
+      type: git
+      url: https://github.com/nex-agi/NexAU.git
+  enabled: false
+  model: null
+  timeout_minutes: 60
+  web_sources:
+  - focus: E2B sandbox 生命周期、预装软件、资源限制
+    url: https://e2b.dev/docs/sandbox/overview
+  - focus: sandbox API：文件操作、进程管理、网络
+    url: https://e2b.dev/docs/sandbox/api
+  - focus: LangChain deepagents 架构详解：multi-agent、context 管理、tool 设计，52.8%→66.5% 的每个改进步骤和消融数据
+    url: https://blog.langchain.dev/how-we-built-the-1-agent-on-terminal-bench/
+  - focus: HumanLayer harness 设计详解：context 优化策略、hook vs prompt、harness 层优化 vs agent
+      层优化的区分
+    url: https://humanlayer.dev/blog/building-coding-agents
+  - focus: Claude Code 最佳实践详解：skill 系统、compaction 策略、hook 设计、prompt 结构、tool 调用模式
+    url: https://www.anthropic.com/engineering/claude-code-best-practices
+  - focus: Anthropic SWE-bench 技术报告：agent 架构、搜索策略、编辑方法、消融实验结果
+    url: https://www.anthropic.com/engineering/swe-bench-sonnet
+  - focus: OpenHands/OpenDevin 架构：event stream、AgentController、sandbox 集成、多 agent
+      协调
+    url: https://docs.all-hands.dev/modules/usage/architecture
+  - focus: Aider 排行榜：不同 LLM 在 coding benchmark 上的得分对比、edit format 影响
+    url: https://aider.chat/docs/leaderboards/
+  - focus: Devin Terminal Bench 结果和架构设计：长时间任务处理、环境管理、多步推理
+    url: https://www.cognition.ai/blog/devin-terminal-bench
+  - focus: Terminal Bench 官方页面：最新排行榜、评测方法、任务分类
+    url: https://terminal-bench.com
+explore_agent_patch:
+  llm_config:
+    stream: true
+harbor:
+  agent: nexau
+  e2b_sandbox_timeout: 3600
+  env: e2b
+  force_build: false
+  k: 2
+  n_concurrent: 64
+harbor_job_timeout_minutes: 0
+llm:
+  api_key: ${env.LLM_API_KEY}
+  base_url: https://ark.cn-beijing.volces.com/api/coding/v3
+  model: kimi-k2.5
+max_iterations: 3
+notify:
+  enabled: false
+  feishu_webhook: ${FEISHU_WEBHOOK}
+path: ./swebench-verified
+post_evolve:
+  datasets:
+  - n_concurrent: 24
+    name: swebench-verified
+  enabled: false
+source_config_dir: agents/code_agent_simple
+target_pass_rate: 0.95

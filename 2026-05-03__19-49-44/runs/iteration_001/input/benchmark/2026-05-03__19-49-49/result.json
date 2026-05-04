@@ -1,0 +1,32 @@
+{
+    "id": "39db4d07-d17d-4196-a435-fc09465be640",
+    "started_at": "2026-05-03T19:49:49.375586",
+    "finished_at": "2026-05-03T20:02:29.593656",
+    "n_total_trials": 2,
+    "stats": {
+        "n_trials": 2,
+        "n_errors": 0,
+        "evals": {
+            "nexau__swebench-verified": {
+                "n_trials": 2,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.5
+                    }
+                ],
+                "reward_stats": {
+                    "reward": {
+                        "1.0": [
+                            "astropy__astropy-12907__2GmyUZk"
+                        ],
+                        "0.0": [
+                            "astropy__astropy-12907__GR4LFR5"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        }
+    }
+}
