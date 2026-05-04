@@ -173,13 +173,15 @@ def _build_agent(llm_settings: dict) -> Any:
 def _parse_inner_payload(raw: Any) -> dict:
     if not isinstance(raw, str):
         raise RunnerError("complete_task `result` is not a string")
+    # Models often emit raw newlines/tabs inside string fields; strict JSON forbids
+    # those unless escaped. NexAU still completes the task, so accept them here.
     try:
-        return json.loads(raw)
+        return json.loads(raw, strict=False)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not m:
             raise RunnerError(f"complete_task result is not JSON: {raw[:200]}")
-        return json.loads(m.group(0))
+        return json.loads(m.group(0), strict=False)
 
 
 def _parse_run_output(run_output: Any) -> dict:

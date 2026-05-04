@@ -102,3 +102,37 @@ def test_ask_mode_retries_when_payload_invalid(tmp_path, monkeypatch):
 
     assert result.answer == "fixed"
     assert fake_agent.run.call_count == 2
+
+
+def test_ask_mode_accepts_inner_json_with_literal_newline_in_answer(tmp_path, monkeypatch):
+    """LLM may submit complete_task result with unescaped newlines inside ``answer``."""
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("LLM_BASE_URL", "u")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AHE_HOME", str(tmp_path))
+    (tmp_path / "evolve_agent" / "tools").mkdir(parents=True)
+    (tmp_path / "evolve_agent" / "tools" / "__init__.py").write_text("")
+
+    malformed_inner = '{"mode": "ask", "answer": "hello' + "\n" + 'world"}'
+    fake_agent = MagicMock()
+    fake_agent.run.return_value = json.dumps(
+        {
+            "success": True,
+            "message": "Result submitted and task completed.",
+            "status": "TASK_COMPLETED",
+            "task_completed": True,
+            "output": {"result": malformed_inner},
+        },
+        ensure_ascii=False,
+    )
+
+    with patch("agent_debugger_core.runtime.runner._build_agent", return_value=fake_agent):
+        result = run_agent(
+            trace_paths=[Path("/fake/trace.json")],
+            mode="ask",
+            question="why?",
+        )
+
+    assert result.mode == "ask"
+    assert result.answer == "hello\nworld"
