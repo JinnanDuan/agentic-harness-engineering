@@ -124,7 +124,7 @@ agent_debugger:
 
   # 可选：为 adb 指定独立 LLM，不指定则复用 LLM_* 环境变量
   llm:
-    model: "glm-5.1"
+    model: "kimi-k2.6"
 
 post_evolve:
   enabled: false
