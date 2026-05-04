@@ -343,6 +343,25 @@ def find_latest_job_dir(jobs_root: Path) -> Path | None:
     return max(job_dirs, key=lambda d: d.name)
 
 
+_HARBOR_JOB_DIR_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}__\d{2}-\d{2}-\d{2}$")
+
+
+def find_latest_benchmark_job_under_experiments() -> Path | None:
+    """Newest Harbor timestamp directory under any ``experiments/**/input/benchmark/``."""
+    if not EXPERIMENTS_DIR.is_dir():
+        return None
+    candidates: list[Path] = []
+    try:
+        for p in EXPERIMENTS_DIR.glob("**/input/benchmark/*"):
+            if p.is_dir() and _HARBOR_JOB_DIR_NAME.match(p.name):
+                candidates.append(p)
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x.name)
+
+
 class HarborJobTimeoutError(Exception):
     """Single harbor evaluation timeout."""
     pass
@@ -4282,8 +4301,14 @@ def _run_harbor_with_explore_agent(
 # Main Loop
 # ---------------------------------------------------------------------------
 
-def run_single_experiment(config: dict, config_path: str, experiment_name: str | None = None,
-                          start_iteration: int = 1, skip_eval: bool = False) -> None:
+def run_single_experiment(
+    config: dict,
+    config_path: str,
+    experiment_name: str | None = None,
+    start_iteration: int = 1,
+    skip_eval: bool = False,
+    skip_eval_job_dir: Path | None = None,
+) -> None:
     """Run the full evolution loop for a single experiment."""
     source_dir = resolve_source_dir(config)
     agent_config_filename = config["agent_config_filename"]
@@ -4426,13 +4451,41 @@ def run_single_experiment(config: dict, config_path: str, experiment_name: str |
                 benchmark_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     if skip_eval:
-                        job_dir = find_latest_job_dir(benchmark_dir)
+                        job_dir = None
+                        if skip_eval_job_dir is not None:
+                            cand = skip_eval_job_dir.expanduser().resolve()
+                            if not cand.is_dir():
+                                print(f"[error] --job-dir is not a directory: {cand}")
+                                sys.exit(1)
+                            job_dir = cand
+                        if job_dir is None:
+                            job_dir = find_latest_job_dir(benchmark_dir)
                         if job_dir is None:
                             job_dir = find_latest_job_dir(iteration_dir)
                         if job_dir is None:
+                            job_dir = find_latest_job_dir(PROJECT_DIR / "jobs")
+                        if job_dir is None:
+                            job_dir = find_latest_benchmark_job_under_experiments()
+                            if job_dir is not None:
+                                try:
+                                    _rel = job_dir.relative_to(EXPERIMENTS_DIR)
+                                except ValueError:
+                                    _rel = job_dir
+                                print(
+                                    f"[eval] --skip-eval: using newest job under experiments/: {_rel}",
+                                    flush=True,
+                                )
+                        if job_dir is None:
                             job_dir = find_latest_job_dir(ROOT_DIR / "jobs")
                         if job_dir is None:
-                            print("[error] --skip-eval but no job directory found")
+                            print(
+                                "[error] --skip-eval but no Harbor job directory found.\n"
+                                "  Searched: runs/.../input/benchmark/, iteration folder, "
+                                f"{PROJECT_DIR / 'jobs'}, any experiments/**/input/benchmark/, "
+                                f"{ROOT_DIR / 'jobs'}.\n"
+                                "  Use a run that already has benchmark output, or pass e.g.\n"
+                                "    --job-dir experiments/<exp>/runs/iteration_001/input/benchmark/<timestamp>/"
+                            )
                             sys.exit(1)
                         print(f"[eval] Skipping evaluation, using existing results: {job_dir.name}")
                         skip_eval = False
@@ -4816,6 +4869,13 @@ def main():
         "--skip-eval", action="store_true",
         help="Skip evaluation, use latest job results (for debugging)",
     )
+    parser.add_argument(
+        "--job-dir", type=str, default=None,
+        help=(
+            "With --skip-eval: use this Harbor job directory (the timestamp folder under "
+            "input/benchmark/) instead of searching."
+        ),
+    )
     args = parser.parse_args()
 
     # --batch mode
@@ -4843,12 +4903,16 @@ def main():
     if not args.config:
         parser.error("Single experiment mode requires --config argument")
     config = load_config(args.config)
+    _job_dir_arg: Path | None = None
+    if args.job_dir:
+        _job_dir_arg = Path(args.job_dir)
     run_single_experiment(
         config=config,
         config_path=args.config,
         experiment_name=args.experiment,
         start_iteration=args.start_iteration,
         skip_eval=args.skip_eval,
+        skip_eval_job_dir=_job_dir_arg,
     )
 
 

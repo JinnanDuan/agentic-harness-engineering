@@ -16,7 +16,8 @@ usage() {
 选项:
   --experiment NAME        恢复已有实验 (experiments/ 下的目录名)
   --start-iteration N      从第 N 轮开始 (默认 1)
-  --skip-eval              跳过评测，直接用已有结果
+  --skip-eval              跳过评测，复用已有 Harbor job（见下方说明）
+  --job-dir PATH          与 --skip-eval 合用：直接指定 benchmark 下的时间戳目录
   --session NAME           自定义 tmux session 名称
   --batch                  批量模式：启动 configs/experiments/ 下所有实验
   --attach                 启动后自动 attach 到 tmux session
@@ -28,6 +29,10 @@ usage() {
 
   # 恢复中断的实验，从第 16 轮继续
   ./scripts/evolve.sh --experiment 2026-03-13__18-02-54__gpt54 --start-iteration 16 configs/experiments/exp-003-gpt54.yaml
+
+  # 新建实验但跳过评测：会自动选用 experiments/ 下最新的 benchmark job，或配合 --job-dir
+  ./scripts/evolve.sh --skip-eval configs/test.yaml
+  ./scripts/evolve.sh --skip-eval --job-dir experiments/某实验/runs/iteration_001/input/benchmark/2026-05-03__19-49-49 configs/test.yaml
 
   # 批量启动所有实验
   ./scripts/evolve.sh --batch
@@ -46,6 +51,7 @@ EOF
 EXPERIMENT=""
 START_ITER=""
 SKIP_EVAL=""
+JOB_DIR_ARG=""
 SESSION_NAME=""
 BATCH_MODE=false
 AUTO_ATTACH=false
@@ -59,6 +65,8 @@ while [[ $# -gt 0 ]]; do
             START_ITER="$2"; shift 2 ;;
         --skip-eval)
             SKIP_EVAL="--skip-eval"; shift ;;
+        --job-dir)
+            JOB_DIR_ARG="$2"; shift 2 ;;
         --session)
             SESSION_NAME="$2"; shift 2 ;;
         --batch)
@@ -154,6 +162,9 @@ if [[ -n "$START_ITER" ]]; then
 fi
 if [[ -n "$SKIP_EVAL" ]]; then
     CMD="$CMD $SKIP_EVAL"
+fi
+if [[ -n "$JOB_DIR_ARG" ]]; then
+    CMD="$CMD --job-dir '$JOB_DIR_ARG'"
 fi
 
 # 在命令末尾加 shell 保持 session，方便查看最终输出
